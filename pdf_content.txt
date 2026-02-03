@@ -1,0 +1,905 @@
+2 
+First Steps with LLM Workflows 
+Introduction 
+You’ve made it this far, which means you’re ready for a case study—so let’s get cooking. Our 
+first major case study will be an LLM workflow with a type of agentic behavior called Retrieval 
+Augmented Generation (RAG). The primary function of a RAG system is to answer questions 
+for a user given the ability to look up information from some store of data (which I’ll also refer 
+to as documents). The idea is that the LLM doesn’t have enough context to answer these 
+questions alone and often needs to use external information when answering queries. 
+A RAG system generally has three parts: 
+●​ An indexer: A mechanism to compress raw text data into vectors; stored in a 
+database. 
+●​ A retriever: Closely tied to the indexer; something to retrieve data from that database 
+given a query. 
+●​ A generator: An LLM to reason through the user’s query and the retrieved 
+knowledge to provide an inline conversational response. This can be GPT, Claude, 
+Llama, or something else. 
+
+Figure 2.1 visualizes these components in an end-to-end RAG system. You’ll often find RAG 
+systems in customer support, sales, and other operational organizations that have to maintain and 
+refer to stores of information (FAQs, knowledge bases, etc.). I’ve already done case studies that 
+deal with exactly this issue in past books and lectures—so for this book, we will take a slightly 
+more interesting approach to our first case study. (To be clear, you will not need to be familiar 
+with any of my prior case studies to follow any case study in this book.) 
+ 
+Figure 2.1 The end-to-end RAG pipeline has three phases: indexing documents, retrieving them later, and augmenting prompts 
+with retrieved documents. This yields a system grounded in factual knowledge. 
+
+Case Study 1: Text-to-SQL Workflow 
+Our RAG system will go slightly beyond answering queries; that is, it will ask an LLM to 
+generate SQL queries to answer questions given a specific schema. This type of query/code 
+generation is quite common in enterprises with large and messy databases. 
+Our RAG system will work like this (Figure 2.2 provides a high-level view): 
+1.​ A user asks a question that may or not be answered by information in the database. 
+2.​ The LLM, using a prewritten system prompt with important information, takes in the 
+query as input, and through a structured output, generates a SQL query. 
+3.​ The system runs the SQL query against the database and outputs the results to the 
+user. 
+ 
+
+None
+Figure 2.2 A high-level view of the retrieval and generation portion of the RAG workflow. The user query is fed into a predefined 
+prompt, which yields a SQL query, which is then executed against a real SQL database. 
+At this point, you might be wondering about a few things: Could this workflow benefit from 
+few-shot prompting or chain-of-thought prompting? How should we structure the database 
+schema? You’re already asking the right questions and you’re in the right place to answer them! 
+But before we can dive into questions like these (which we’ll do in Chapter 3), we should 
+consider how we can build production-ready LLM workflows. 
+To get started, we need some data. To keep things relatively simple and accessible, let’s use a 
+publicly available benchmark on SQL generation called BIRD-SQL. BIRD (BIg Bench for 
+LaRge-Scale Database Grounded Text-to-SQL Evaluation) contains more than 12,000 unique 
+question–SQL pairs, stored in 95 databases with a total size of more than 33 GB. We will use a 
+subset of these to do our work. Listing 2.1 provides the code for how we load up the benchmark. 
+Listing 2.1 Loading up the BIRD benchmark questions 
+# Load text-to-SQL examples from dev.json 
+import json 
+# Load the dev.json file 
+
+with open('../../dev.json', 'r') as f: 
+   dev_data = json.load(f) 
+ 
+print(dev_data[0]) 
+---- 
+{'question_id': 0, 
+ 'db_id': 'california_schools', 
+ 'question': 'What is the highest eligible free rate for 
+K-12 students in the schools 
+in Alameda County?', 
+
+ 'evidence': 'Eligible free rate for K-12 = `Free Meal 
+Count (K-12)` / `Enrollment 
+(K-12)`', 
+ 'SQL': "SELECT `Free Meal Count (K-12)` / `Enrollment 
+(K-12)` FROM frpm WHERE `County 
+Name` = 'Alameda' ORDER BY (CAST(`Free Meal Count (K-12)` 
+AS REAL) / `Enrollment 
+(K-12)`) DESC LIMIT 1", 
+ 'difficulty': 'simple'} 
+There’s actually another reason I chose this dataset: The sample questions often require 
+additional context about the database to be solved. Figure 2.3 shows an example of a single data 
+point from the benchmark. The question is tied to a specific database (which we will explore in 
+the next section), which contains an example SQL query that would answer the question as well 
+as a sense of the “evidence”—that is, context about the question that would aid a human or an AI 
+model in generating the query. 
+
+ 
+Figure 2.3 An example of a question from the BIRD SQL benchmark, highlighting the natural language query, the “evidence” 
+(pieces of context that guide the LLM’s reasoning), a ground-truth SQL query, and a label of difficulty (labeled by humans). 
+In our RAG system, we will consider the evidence to be documents to retrieve, because it would 
+be a waste of prompt space (and therefore time and money) to just include all possible pieces of 
+evidence in the prompt. Let’s get started with some exploratory data analysis using our dataset. 
+
+Exploratory Data Analysis 
+To begin most of the case studies in this book, I will highlight some of the features and 
+limitations of the dataset as a kind of briefing before we dig into the task at hand. To keep things 
+loose and quick, I’ll number these items and briefly describe them so we can get to our AI 
+application with minimal delays. 
+1.​ We have multiple databases with varying difficulty of questions. We will work 
+with 11 databases, each containing questions with varying levels of difficulty (as 
+noted by the benchmark itself; Figure 2.4). 
+2.​ The database schemas vary in size. Each database has a number of tables, fields, 
+foreign keys, and other components. I wrote a function called 
+describe_database to describe the entire database schema that is used to pass 
+text into the LLM. I plotted the length of each schema for each database in Figure 
+2.5. I’ve also provided a sample output of the describe_database function. 
+3.​ There’s no “ground-truth answer” to compare to. The benchmark has an expected 
+SQL statement. However, there can be multiple ways to write a SQL query, so in 
+reality we need to match the generated SQL’s result to the expected result. Figure 2.6 
+visualizes this idea: For a single data point, the AI model generated a slightly 
+different piece of SQL but produced the exact same result. 
+
+ 
+Figure 2.4 A breakdown of the number of questions in each difficulty bucket for each of the 11 databases in the benchmark. 
+
+ 
+Figure 2.5 Some databases have larger schemas than others, with more tables, more fields, more foreign keys, and so on. We 
+might expect larger schemas to be more “challenging” for the LLM to pull evidence from and generate queries for the database, 
+but not always. Sometimes, the schema might be large but straightforward. Shown here is the output of the 
+describe_database function I wrote for the smallest database description for any of the schemas: toxicology. 
+
+ 
+Figure 2.6 The given ground-truth SQL query may not be the only way to pull the same data. Here, our workflow (which we 
+haven’t built yet) can generate a piece of SQL that is technically different from the given ground truth, but both yield the same 
+table of data when run against the database. 
+
+With this context in mind, let’s dive into building our workflow. 
+The First LLM Workflow 
+Figure 2.7 shows the workflow we will construct. The general pathway for this workflow is as 
+follows: 
+1.​ A user has a query for a specific database (e.g., formula_1). 
+2.​ The query is used to grab relevant evidence (using embedding similarity). 
+3.​ An LLM is given the query and the possible evidence and generates an SQL query 
+(using a chain-of-thought prompt). 
+4.​ The SQL query is passed to the “DB Node” to run against the database. 
+5.​ If the SQL runs, the result is shown to the user. 
+​
+a. Else, the workflow will show some canned response. 
+
+ 
+Figure 2.7 This LLM workflow has several nodes and edges, with data being passed around between them. The ultimate goal is 
+to generate a message and send it back to a user with a query about a database. 
+Note a few things about this workflow: 
+●​ The workflow assumes that the evidence already exists, and we force the workflow to 
+attempt to grab evidence no matter the input. 
+●​ We will use a simpler prompt for now, but test variants of prompts in Chapter 3. 
+●​ We will set up this LLM for now, but also test others in Chapter 3. 
+
+To tie all of these components together, we need a common language and framework. I will be 
+using LangGraph, from the makers of LangChain. LangGraph is an open-source library built to 
+create workflows and AI agents using a graph-based approach. I love that it provides the building 
+blocks for workflows and agentic pipelines, while also standardizing LLM usage across models 
+and providers. Let’s dive into our RAG components. 
+Step 1: Indexing Evidence into a Database 
+Before we can create a workflow to retrieve evidence and generate SQL, we need to index the 
+evidence in such a way that the workflow can retrieve it later. To do this, we will use a vector 
+database—that is, a database designed to perform searches based on natural language 
+embedding similarity. We will dig into that process in step 3. For now, though, we will index the 
+given evidence in our BIRD benchmark in a vector database. We will use the open-source 
+Chroma database for the vector database in this case study, but note that all vector databases 
+offer this feature. 
+The substeps are as follows: 
+1.​ For each question in our BIRD benchmark, iterate over the given evidence. 
+
+2.​ For each piece of evidence, embed the evidence using an embedder (we will 
+experiment with other embedders in Chapter 3). 
+3.​ Upload the evidence to the database with the following information (Figure 2.8): 
+​
+a. The embedding of the evidence (to use for fast retrieval; see step 3) 
+​
+b. The raw text of the evidence, for the LLM to read 
+​
+c. The database it is for (e.g., formula_1), so the workflow can 
+differentiate which evidence is needed to answer a given question 
+​
+d. Any other ancillary metadata, which can be given in a dictionary format 
+ 
+
+None
+Figure 2.8 Indexing documents into a vector database consists of running raw text through an embedding model, and storing the 
+resulting one-dimensional vector along with the raw evidence plus any metadata for future retrieval. 
+Listing 2.2 shows a code snippet of how we index our evidence into a Chroma database. 
+Listing 2.2 Index the pieces of evidence into a vector database (Chroma) 
+# Create documents from the text-to-SQL examples 
+from langchain_core.documents import Document 
+ 
+# Initialize embeddings (using OpenAI for now) 
+
+embeddings = 
+OpenAIEmbeddings(model="text-embedding-3-small") 
+ 
+# Initialize vector store 
+vector_store = Chroma( 
+    client=chroma_client, 
+    collection_name="documents", 
+    embedding_function=embeddings, 
+    collection_metadata={"hnsw:space": "cosine"}, 
+) 
+
+ 
+documents = [] 
+for item in dev_data: 
+   # Create a comprehensive document with question, 
+evidence, and SQL 
+   evidences = [e.strip() for e in 
+item['evidence'].split(';') if e.strip()] 
+ 
+ 
+   for evidence in evidences: 
+
+       doc = Document( 
+           page_content=evidence, 
+           metadata={"db_id": item["db_id"]}  # so we can 
+query using metadata 
+       ) 
+   documents.append(doc) 
+ 
+# Add documents to vector store 
+print(f"
+ Loading {len(documents)} text-to-SQL examples 
+into vector store...") 
+
+vector_store.add_documents(documents) 
+print(f"
+ Added {len(documents)} text-to-SQL examples to 
+the vector store") 
+Once we have indexed the evidence, we can begin to build our LLM workflow by following four 
+steps: 
+1.​ Set up the overall LangGraph framework. 
+2.​ Implement the evidence retrieval. 
+3.​ Write the SQL generation prompt. 
+4.​ Execute the SQL and error handling. 
+Let’s begin with evidence retrieval and the basics of our workflow framework, LangGraph. 
+Step 2: Setting Up LangGraph 
+
+None
+LangGraph relies on the concept of a “state” to pass variables and information around nodes 
+during execution. This state object is crucial because it is the input to every single node, and the 
+output of every single node is an update (if there is any) to the state. So, the first thing we need to 
+do is to define what variables the workflow will need to keep track of. Listing 2.3 highlights the 
+state object we will be using. A few important points are highlighted here: 
+●​ We will assume we know in advance which database we are making queries for 
+(that’s what the db_id key is for). 
+●​ We set the LLM we want to use (model_name). 
+●​ We have some hard-coded variables like k (the number of pieces of evidence to 
+retrieve). 
+Listing 2.3 Defining the state of the graph 
+from pydantic import BaseModel, Field 
+ 
+class RAGState(BaseModel): 
+
+    """State for the RAG workflow""" 
+    db_path: str = ""  # The path to the database 
+    sql_result: Dict[str, Any] = 
+Field(default_factory=dict)  # The result of the SQL 
+query 
+    model_name: str = "gpt-4.1-mini"  # The model to use 
+for the LLM 
+    messages: Annotated[List[BaseMessage], add_messages] = 
+Field(default_factory=list)  # Conversation 
+history/messages 
+    query: str = ""  # The user's query/question 
+
+    sql_query: str = ""  # The SQL query generated by the 
+LLM 
+    reasoning: str = ""  # The reasoning for the SQL query 
+    retrieved_documents: List[RetrievedDocument] = 
+Field(default_factory=list)  # List of retrieved documents 
+    context: str = ""  # Combined context from retrieved 
+documents 
+    final_answer: str = ""  # The final answer generated by 
+the system 
+    k: int = 5  # Number of documents to retrieve 
+    db_id: str = ""  # The database id (e.g., 'formula_1') 
+
+With our state defined, we can move on to assembling the key nodes of our workflow. 
+Step 3: Implementing Evidence Retrieval 
+Once a user query is submitted to our system (e.g., “Who was the youngest driver in the 2023 F1 
+season”), the first thing our RAG system will do is attempt to pull evidence from the database 
+(Figure 2.9). In step 1, we indexed evidence into a Chroma database; now it’s time to retrieve 
+that evidence. 
+ 
+
+Figure 2.9 We are focusing on the retrieval portion of our RAG workflow. 
+To keep our first workflow simple, we will rely on the relatively robust embedding similarity. 
+Basically, we will embed the natural language query using the same embedder that we used in 
+step 1 (that is crucial—in general, they must be the same exact embedder) and then retrieve the 
+pieces of evidence with the highest similarity to the embedding to the natural language query. We 
+will define similarity for now as cosine similarity. Figure 2.10 visualizes this kind of similarity. 
+In essence, embedding models are trained to produce embeddings that are near each other if the 
+original pieces of text are similar in some way. So, if we embed the query and compare it to the 
+pieces of evidence, we hope the information retrieval will be effective (and starting in Chapter 
+3, we evaluate whether it is). 
+ 
+
+Figure 2.10 Cosine similarity is a standard way to compare embeddings against each other. The idea is that a smaller angle 
+between vectors formed by text implies that the text samples are semantically similar to each other and will yield a higher cosine 
+similarity. Therefore, higher cosine similarity indicates that the source text samples are similar. 
+Cosine similarity is not the only similarity metric we could use for our vectors. Other examples 
+include the dot product (which is extremely fast to compute), Euclidean distance (also known as 
+L2 Norm or the distance formula; slow to compute), Manhattan distance (also known as L1 
+Norm; fast to compute but best for databases with much bigger dimensions with less filled-in 
+data), and Hamming distance (best for discrete vectors full of integers, rather than continuous 
+floating points). Cosine similarity balances both speed and precision with a hidden surprise: 
+When all of the vectors in question are of magnitude 1 (in math, magnitude refers to the length of 
+the vector), the dot product and cosine similarity produce the exact same number. That explains 
+why most of the embeddings you use will produce vectors of magnitude 1, even though you 
+probably have never noticed that point. 
+Listing 2.4 shows an abbreviated implementation of our retrieval node, with all of the 
+components discussed so far. 
+Listing 2.4 Defining the state of the graph 
+
+None
+@dataclass 
+class RetrievedDocument: 
+    """Represents a document retrieved from the vector 
+store""" 
+    content: str 
+    metadata: Dict[str, Any] 
+    score: float 
+ 
+def retrieve_documents(state: RAGState) -> Dict[str, Any]: 
+
+    """Retrieve relevant documents from ChromaDB, matching 
+the db_id in state.""" 
+    print(f"
+ Retrieving top {state.k} documents for 
+query: {state.query} 
+(db_id: {state.db_id})") 
+ 
+    try: 
+        # Perform similarity search, filtering by db_id in 
+metadata 
+        results = 
+vector_store.similarity_search_with_score( 
+
+            query=state.query, 
+            k=state.k, 
+            filter={"db_id": state.db_id} if state.db_id 
+else None 
+        ) 
+ 
+        # Convert to RetrievedDocument objects 
+        retrieved_docs = [] 
+        for doc, score in results: 
+            retrieved_docs.append(RetrievedDocument( 
+
+                content=doc.page_content, 
+                metadata=doc.metadata, 
+                score=1 - score  # Convert distance to 
+similarity score 
+            )) 
+ 
+    print(f"
+ Retrieved {len(retrieved_docs)} documents") 
+        for i, doc in enumerate(retrieved_docs, 1): 
+            print(f"   {i}. Score: {doc.score:.4f} | 
+Content: {doc.content[:100]}...") 
+
+ 
+        # Create context from retrieved documents 
+        context_parts = [] 
+        for i, doc in enumerate(retrieved_docs, 1): 
+            context_parts.append(f"Document 
+{i}:\n{doc.content}") 
+            if doc.metadata: 
+                context_parts.append(f"Metadata: 
+{doc.metadata}") 
+            context_parts.append("")  # Empty line for 
+separation 
+
+ 
+        context = "\n".join(context_parts) 
+ 
+        return { 
+            "retrieved_documents": retrieved_docs, 
+            "context": context, 
+        } 
+ 
+    except Exception as e: 
+
+    print(f"
+ Error retrieving documents: {e}") 
+        return { 
+            "retrieved_documents": [], 
+            "context": "No documents could be retrieved due 
+to an error.", 
+        } 
+Note a few things about this code: 
+●​ The input to the node is the state object we created in step 2. This will be the case for 
+every node in our workflow. 
+●​ The output of every node is a dictionary whose keys match the RagState object’s 
+keys in Listing 2.3. It is best practice to match the keys with the state with the keys 
+being outputted in the nodes—even though, technically speaking, the output could 
+
+contain keys that are not defined in the state but will still be updated. Matching the 
+keys (such as retrieved_documents) makes it easier to return to the code later 
+and know exactly what each state update it is trying to accomplish. 
+●​ Once a node returns this dictionary, the back-end code of LangGraph will change the 
+state. The variable changes will be reflected by the time we reach the next node, 
+which will also take in the RagState variable as its sole input. 
+That’s our retrieval! At this stage, you might have a few questions: 
+●​ What if the embedder isn’t powerful enough to understand both pieces of text? 
+●​ We will test different embedders in Chapter 3. 
+●​ What if we don’t need evidence and the user is just saying something like “hi” or 
+“hello,” without understanding the rigidity of the workflow? 
+●​ We can’t really solve this issue without either adding logic directly into 
+the workflow to handle this case or evolving the system into an agent 
+(which we will discuss in a later chapter). 
+We will address these questions and more in later chapters. For now, let’s continue with our 
+workflow definitions. 
+
+Step 4: Writing the Prompt for SQL Generation 
+Figure 2.11 shows the portion of the workflow we are working on in this step. With the evidence 
+retrieved, we can ask the LLM to generate a SQL query given three inputs: 
+●​ The query the user had 
+●​ The database description (e.g., tables, fields, foreign keys) 
+●​ The retrieved evidence 
+ 
+
+None
+Figure 2.11 We are focusing on the generation portion of our RAG workflow. 
+For now, we’ll keep our prompt simple to get a baseline; in Chapter 3, we’ll use prompt 
+engineering to get even better results. Listing 2.5 defines our SQL generation node. Note the 
+following points: 
+●​ We are using structured outputs to encourage the LLM to produce an output that is 
+much easier to parse. 
+●​ The prompt is barely more than our three inputs with simple prefixes to let the AI 
+model know what it is looking at. 
+●​ I set temperature to 0 here to aim for more consistency in our pipeline; that is, the 
+same inputs should generate roughly the same outputs every time. 
+●​ I rely on LangChain’s built-in message classes to add user messages (the 
+HumanMessage class), and AI messages (AIMessage). 
+Listing 2.5 The SQL generation node using structured outputs 
+class SQLOutput(BaseModel): 
+
+    reasoning: str = Field(description="Think through step 
+by step how to solve the 
+problem.") 
+    sql_query: str = Field(description="The executable SQL 
+query") 
+ 
+    def dict(self): 
+        return { 
+            "reasoning": self.reasoning, 
+            "sql_query": self.sql_query 
+
+        } 
+ 
+def generate_sql_query(state: RAGState) -> Dict[str, Any]: 
+    """Generate SQL query using retrieved documents""" 
+    print("
+ Generating answer using retrieved 
+context...") 
+ 
+    # Initialize LLM 
+    llm = ChatOpenAI(model=state.model_name, 
+temperature=0).with_structured_ 
+
+output(SQLOutput) 
+ 
+    new_message = HumanMessage(content=f"Question: 
+{state.query}\nContext: {state. 
+context}\nDatabase Description: 
+describe_database(state.db_path)}") 
+ 
+    # Add new message to messages 
+    messages = [ 
+        *state.messages, 
+
+        new_message 
+    ] 
+ 
+    try: 
+        # Generate response 
+        response = llm.invoke(messages) 
+ 
+        # Add AI response to messages 
+ 
+
+        return { 
+            "messages": [ 
+                *messages, 
+                AIMessage(content=f'Reasoning: 
+{response.reasoning}\nSQL Query: 
+{response.sql_query}') 
+            ], 
+            "sql_query": response.sql_query, 
+            "reasoning": response.reasoning, 
+        } 
+
+ 
+    except Exception as e: 
+        error_msg = f"Error generating answer: {e}" 
+    print(f"
+ {error_msg}") 
+ 
+        updated_messages = state.messages.copy() 
+        
+updated_messages.append(AIMessage(content=error_msg)) 
+ 
+
+        return { 
+            "messages": updated_messages, 
+            "final_answer": error_msg, 
+        } 
+Figure 2.12 shows an example of the user message with the final question, context, and database 
+description. 
+ 
+
+Figure 2.12 A sample user message that will be sent to the LLM to generate a SQL query to answer the question. The context 
+represents the evidence we pulled from the vector database; the database description is the same string as in Figure 2.5. This 
+should be all the information required to get this question answered, assuming the documents we pulled for the context key are 
+relevant. 
+With evidence retrieval and SQL query generation in place, we have our RAG: 
+●​ Retrieval—the evidence retrieval 
+●​ Augmented—with a simple prompt for now 
+●​ Generation—using structured outputs and LLMs 
+We are ready to go. All we need to do is execute the SQL and combine the nodes using edges. 
+Step 5: Putting It All Together 
+We can now execute an AI-generated SQL query (as seen in the workflow in Figure 2.13). This 
+completes our bare-bones SQL generation RAG workflow. 
+
+ 
+Figure 2.13 We are focusing on the SQL execution and final output message portion of our RAG workflow. 
+Listing 2.6 shows a snippet of the SQL execution node (labeled as the DB Node in the preceding 
+figure). The input to the node is the state of the graph and it will output a dictionary of 
+information that will automatically update the state. The node will execute the SQL against the 
+database and format a string with the results of the SQL query and update the state with the SQL 
+result (raw lists of data) and the final answer (our pretty formatted string). 
+Listing 2.6 The SQL execution node 
+
+None
+def run_sql_query(state: RAGState) -> Dict[str, Any]: 
+    """Execute SQL query on the specified database""" 
+    import sqlite3 
+    import os 
+ 
+    print(f"
+ Executing SQL query on database 
+'{state.db_id}': {state.sql_query}") 
+ 
+    ....  # Using Sqllite to execute the query 
+
+ 
+        sql_result = { 
+            "success": True, 
+            "columns": columns, 
+            "data": results, 
+            "row_count": len(results), 
+            "sql_query": state.sql_query 
+        } 
+ 
+
+    print(f"
+ SQL query executed successfully! Found 
+{len(results)} row(s)") 
+ 
+        # Format results for final answer 
+        if results: 
+            result_text = f"Query executed successfully! 
+Found {len(results)} 
+row(s):\\n\\n" 
+ 
+            # Add column headers 
+
+            if columns: 
+                result_text += " | ".join(columns) + "\\n" 
+                result_text += "-" * (len(" | 
+".join(columns))) + "\\n" 
+ 
+            # Add data rows (limit to first 10 for 
+readability) 
+            for i, row in enumerate(results[:10]): 
+                result_text += " | ".join(str(cell) if cell 
+is not None else "NULL" 
+for cell in row) + "\\n" 
+
+ 
+            if len(results) > 10: 
+                result_text += f"\\n... and {len(results) - 
+10} more row(s)" 
+        else: 
+            result_text = "Query executed successfully but 
+returned no results" 
+ 
+        return { 
+            "sql_result": sql_result, 
+
+            "final_answer": result_text 
+        } 
+ 
+    except Exception as e: 
+        error_msg = f"Error executing SQL query: {str(e)}" 
+    print(f"
+ {error_msg}") 
+        return { 
+            "sql_result": {"error": error_msg}, 
+            "final_answer": error_msg 
+
+None
+        } 
+With our nodes defined, it’s time to combine them using edges—that is, connections between 
+nodes. In our simple workflow, we will define hard pathways from one node to another without 
+any conditions for now. Listing 2.7 shows the code to create and visualize our workflow using 
+LangGraph’s built-in visualization method. 
+Listing 2.7 Building the LangGraph workflow 
+# Create the workflow graph 
+workflow = StateGraph(RAGState) 
+ 
+# Add nodes 
+
+workflow.add_node("begin_conversation", begin_conversation) 
+workflow.add_node("process_query", process_query) 
+workflow.add_node("retrieve_documents", retrieve_documents) 
+workflow.add_node("generate_sql_query", generate_sql_query) 
+workflow.add_node("run_sql_query", run_sql_query) 
+ 
+# Add edges 
+workflow.add_edge("begin_conversation", "process_query") 
+workflow.add_edge("process_query", "retrieve_documents") 
+
+workflow.add_edge("retrieve_documents", 
+"generate_sql_query") 
+workflow.add_edge("generate_sql_query", "run_sql_query") 
+workflow.add_edge("run_sql_query", END) 
+ 
+# Set entry point 
+workflow.set_entry_point("begin_conversation") 
+ 
+# Compile the workflow and suppress automatic rendering 
+compiled_workflow = workflow.compile() 
+
+ 
+# The compiled workflow is ready to use 
+print("
+ Workflow compiled successfully!") 
+ 
+from IPython.display import Image, display 
+ 
+# Display the image in the notebook 
+display(Image("workflow_graph.png")) 
+
+Figure 2.14 shows LangGraph’s visualization of our entire workflow (the output of Listing 2.7). 
+While it’s definitely a fine graphic, I hope you see why I try to create my own graphics of our 
+workflows! 
+
+ 
+_start
+begin_conversation
+process_query
+retrieve_documents
+generate_sql_query
+run_sql_query
+end
+
+None
+Figure 2.14 LangGraph’s built-in visualizer isn’t exactly amazing, which is why I like to create my own graphics. 
+Folks, we have a workflow. Now, let’s try it out! 
+Using the RAG Workflow 
+Using a LangGraph is as easy as invoking the workflow with an initial state, and then following 
+along. Listing 2.8 shows the simplest way of invoking our workflow with a question and a given 
+database. 
+Listing 2.8 Using the LangGraph workflow 
+db_id = "california_schools" 
+databases_dir = "../../dbs/dev_databases" 
+
+db_path = os.path.join(databases_dir, db_id, 
+f"{db_id}.sqlite") 
+ 
+compiled_workflow.invoke( 
+    { 
+        "query": "What is the highest eligible free rate 
+for K-12 students in the 
+schools in Alameda County?", 
+        "db_id": db_id, 
+        "db_path": db_path 
+
+        } 
+    ) 
+>>>>>> 
+ Processing query: What is the highest eligible free rate 
+for K-12 students in the 
+schools in Alameda County? 
+ Retrieving top 5 documents for query: What is the 
+highest eligible free rate for 
+K-12 students in the schools in Alameda County? (db_id: 
+california_schools) 
+
+ Retrieved 5 documents 
+   1. Score: 0.6390 | Content: Eligible free rate for K-12 
+= 
+`Free Meal Count (K-12)` / `Enrollment (K-12)`... 
+   3. Score: 0.6030 | Content: percent of eligible free 
+rate for K-12 = 
+`Free Meal Count (K-12)` * 100 / `Enrollment (K-12)`... 
+.... 
+ Generating answer using retrieved context... 
+
+ Executing SQL query on database 'california_schools': 
+SELECT 
+MAX([Percent (%) Eligible Free (K-12)]) AS 
+Highest_Eligible_Free_Rate_K12 
+FROM frpm 
+WHERE [County Name] = 'Alameda'; 
+ SQL query executed successfully! Found 1 row(s) 
+Highest_Eligible_Free_Rate_K12 
+------------------------------ 
+1.0  # this is correct :) 
+
+Our workflow works and the answer it generated was correct! We have an immediate problem, 
+though: If we try to ask the workflow a follow-up question, it will fail because the state resets 
+when we invoke the workflow with a new question. To solve this problem, we can add in a 
+human-in-the-loop component using LangGraph’s built-in interrupt function. 
+Stateless Versus Stateful Workflows 
+LangGraph does have the concept of a “state,” which keeps track of variables throughout the 
+nodes. However, we can differentiate between a stateless and stateful RAG system based on its 
+ability to remember information in between queries. For example, suppose I ask, “Who was the 
+youngest driver in 2023,” and let the RAG do its thing, and then ask, “What about oldest.” When 
+I ask the second question, the RAG system would have lost all context from the first one. 
+To add conversational state to our RAG system, we can add a new node called 
+ask_for_user_input and use LangGraph’s concept of an interrupt to pause and wait for 
+user input before going further in the graph. Figure 2.15 shows a clean representation of the 
+statefulness when we use this approach. 
+
+ 
+Figure 2.15 A stateful RAG would keep track of the conversation (on the left) between the user and the AI model, even if we use 
+a different prompt (on the right) to generate SQL queries that are separate from the longer-running conversation. 
+To implement this idea in LangGraph, Listing 2.9 defines our new node, which relies on the 
+interrupt functionality to accept new user feedback. 
+Listing 2.9 Using LangGraph’s built-in interrupt functionality to accept human-in-the-loop 
+messages 
+
+None
+# Import the interrupt function for user input handling 
+from langgraph.types import interrupt 
+ 
+# Add a user input node for conversational flow using 
+LangGraph interrupt 
+def ask_for_user_input(state: RAGState) -> Dict[str, Any]: 
+    """Ask user for the next question in the conversation 
+using LangGraph interrupt""" 
+... 
+ 
+
+    print("\n" + "-"*60) 
+    print("
+ What would you like to ask next?") 
+    print("   (Type 'exit' or 'quit' to end the 
+conversation)") 
+    print("-"*60) 
+ 
+    # Use LangGraph interrupt 
+    user_input = interrupt("Your question: ") 
+ 
+
+    if user_input and user_input.lower().strip() in 
+['exit', 'quit', 'bye', 'done']: 
+        return { 
+            "query": "", 
+            "final_answer": "
+ Goodbye! Thanks for using 
+the SQL RAG system." 
+        } 
+ 
+    return { 
+        "query": user_input or "", 
+
+        "retrieved_documents": [],  # Reset for new query 
+        "context": "", 
+        "sql_query": "", 
+        "reasoning": "", 
+        "sql_result": {}, 
+        "final_answer": "" 
+    } 
+Listing 2.10 implements the new node in our workflow by adding two components to the 
+workflow: 
+
+None
+●​ A conditional edge: A function that determines whether we should go to the end 
+state from ask_for_user_input (if we say “exit,” for example). 
+●​ The MemorySaver checkpoint: This will come up again in the future. This 
+LangGraph feature provides the groundwork for serializing and de-serializing threads 
+for longer-term use and is a built-in statefulness mechanism in a graph. Here we are 
+using it to implement the “interrupt” function, but in later chapters we will use it to 
+store conversation history across several threads. 
+●​ Once the interrupt is run, the workflow is saved. It is then retrieved once the input is 
+given, no matter how long the user takes to ask their follow-up question. 
+Listing 2.10 Adding a conditional edge in the workflow 
+# Conditional function to decide whether to continue or end 
+def should_continue(state: RAGState) -> str: 
+
+   """Decide whether to continue the conversation or end 
+it""" 
+   if state.query == "" or state.query.lower() in ['exit', 
+'quit', 'bye', 'done']: 
+       return END 
+   else: 
+       return "process_query" 
+ 
+# Import MemorySaver for checkpointing (required for 
+interrupt functionality) 
+from langgraph.checkpoint.memory import MemorySaver 
+
+ 
+# Create the conversational workflow graph with proper 
+checkpointing 
+conversational_workflow = StateGraph(RAGState) 
+ 
+# Add nodes 
+...  # Same nodes as before plus a new one 
+conversational_workflow.add_node("ask_for_user_input", 
+ask_for_user_input) 
+ 
+
+# Add edges 
+conversational_workflow.add_edge("begin_conversation", 
+"ask_for_user_input") 
+conversational_workflow.add_conditional_edges( 
+    "ask_for_user_input", 
+    should_continue, 
+    { 
+        "process_query": "process_query", 
+        END: END 
+    } 
+
+) 
+conversational_workflow.add_edge("process_query", 
+"retrieve_documents") 
+conversational_workflow.add_edge("retrieve_documents", 
+"generate_sql_query") 
+conversational_workflow.add_edge("generate_sql_query", 
+"run_sql_query") 
+conversational_workflow.add_edge("run_sql_query", 
+"ask_for_user_input") 
+ 
+# Set entry point 
+
+conversational_workflow.set_entry_point("begin_conversation
+") 
+ 
+# Set up memory for checkpointing (required for interrupt 
+functionality) 
+memory = MemorySaver() 
+ 
+# Compile the conversational workflow with checkpointer 
+compiled_conversational_workflow = 
+  conversational_workflow.compile(checkpointer=memory) 
+
+Figure 2.16 shows the LangGraph visualization of our new workflow, noting the conditional 
+edge with a dotted line. 
+
+ 
+_ start
+begin_conversation
+ask_for_user_input
+process_query
+end
+retrieve_documents
+generate_sql_query
+run_sql_query
+
+Figure 2.16 Our workflow now has a new node and conditional edge, which means we can follow up with more questions or 
+clarifying comments. 
+To help you see the difference, Figure 2.17 shows a sample conversation between our stateless 
+and stateful RAG systems. I would argue that the difference is quite stark! 
+ 
+
+Figure 2.17 The stateful RAG (right) can take in a follow-up question, whereas the stateless RAG (left) forgets the first message 
+and tries to solve tasks in a vacuum (i.e., without context). 
+Conclusion 
+That’s a wrap on our very first LLM workflow. We did a lot in this chapter. We went from a 
+vague idea of how RAG systems work to building a fully functional, stateful, conversational 
+SQL-generation system using LangGraph. Along the way, we laid the groundwork for more 
+advanced workflows and saw how even a relatively simple design can produce accurate, 
+dynamic results. 
+Here’s a quick recap of what we did and how it contributed to our final goal: 
+●​ We indexed evidence into a vector database. We preprocessed and embedded 
+relevant pieces of evidence, storing them with metadata. This made it possible to 
+retrieve just the right context at runtime, which is critical for saving token space and 
+time. 
+●​ We defined a state object for workflow memory. By setting up a shared RAG state, 
+we enabled LangGraph to pass and update variables across nodes. That is how the 
+system keeps track of queries, retrieved documents, reasoning, and results. 
+
+●​ We implemented document retrieval using embedding similarity. This gave our 
+workflow the ability to “look things up” based on semantic meaning, not just 
+keyword matches. It’s the core of how the LLM gets context without needing to 
+receive everything in the prompt. 
+●​ We built a structured prompt to generate SQL. Using structured outputs and a 
+simple prompt format, we had the LLM return both reasoning and a usable SQL 
+query, relying on basic chain-of-thought prompting to get strong baseline results. 
+●​ We executed SQL against our benchmark databases. We closed the loop by 
+actually running the generated query, turning the LLM output into actionable results. 
+This is where the RAG system became truly useful. 
+●​ We wrapped it in a LangGraph workflow. We connected all our nodes into a clean, 
+end-to-end system that can be reused and extended. 
+●​ We added stateful interaction with user input. By introducing interrupt and 
+conversational memory, we ensured the system could handle multiple-turn 
+conversations, which is a major step toward real assistant-like behavior. 
+The LLM workflow created in this chapter is more than a toy example; it’s a foundation. In 
+Chapter 3, we’ll start pressure-testing our workflow with better prompts, smarter retrieval, and 
+more complex logic. Let’s keep building. 
+ 
+ 
+ 
