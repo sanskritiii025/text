@@ -1,26 +1,25 @@
-﻿# Python virtual environment
-data_quality_processor/venv/
-
-# ChromaDB vector store (regeneratable)
-data_quality_processor/sales_memory/
+# Python virtual environment
+venv/
+.venv/
 
 # Python bytecode
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
 
-# Environment variables
+# Secrets
 .env
 .env.local
-.env.*.local
+.streamlit/secrets.toml
 
-# IDE settings
+# Downloaded / generated data (re-create with scripts/)
+data/raw/
+data/bird/
+sales_memory/
+knowledge_store/
+eval/results/*.jsonl
+
+# IDE / OS
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# OS files
 Thumbs.db
 .DS_Store

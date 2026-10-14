@@ -1,0 +1,17 @@
+# Agent + app
+langgraph==1.0.5
+langchain-core==1.6.5
+langchain-google-genai==4.2.2
+langchain-groq==1.1.3
+langchain-ollama==1.1.0
+langchain-openai==1.1.7
+chromadb==1.4.0
+sqlglot==30.19.0
+psycopg2-binary==2.9.11
+python-dotenv==1.2.1
+pandas==2.3.3
+streamlit==1.64.0
+
+# Data loading (scripts/load_rx.py)
+pyarrow==25.0.1
+scikit-learn==1.9.1

@@ -160,3 +160,55 @@ CREATE TABLE agent_audit_logs (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE agent_audit_logs IS 'The "Black Box Recorder". Stores why the AI made a decision.';
+
+
+-- ============================================================
+-- 16. AUDIT TRAIL WIRING
+-- ------------------------------------------------------------
+-- The agent sets a transaction-local variable before every approved
+-- write (via set_config('app.current_reason', ..., true)). This trigger
+-- reads it back and records WHY the change happened, not just what
+-- changed. Without these two objects the agent_audit_logs table above
+-- stays empty -- this is the half that makes it a real audit trail.
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION log_agent_updates()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    -- Capture the AI reasoning from the session variable set in Python.
+    -- The second arg (missing_ok=true) returns NULL instead of raising
+    -- when a human edits the row directly outside the agent.
+    current_reason TEXT := current_setting('app.current_reason', true);
+BEGIN
+    IF current_reason IS NULL THEN
+        current_reason := 'Manual/Direct Update (No AI Context)';
+    END IF;
+
+    INSERT INTO agent_audit_logs (
+        log_id,
+        agent_action,
+        related_entity_id,
+        old_value,
+        new_value,
+        ai_reasoning,
+        timestamp
+    ) VALUES (
+        uuid_generate_v4(),
+        TG_OP,                  -- 'UPDATE' or 'DELETE'
+        OLD.opportunity_id,
+        to_jsonb(OLD),          -- full row before
+        to_jsonb(NEW),          -- full row after
+        current_reason,
+        NOW()
+    );
+
+    RETURN NEW;
+END;
+$function$;
+
+CREATE TRIGGER audit_opportunity_changes
+    BEFORE UPDATE ON opportunities
+    FOR EACH ROW
+    EXECUTE FUNCTION log_agent_updates();

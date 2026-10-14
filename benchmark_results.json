@@ -1,0 +1,164 @@
+{
+  "timestamp": "2026-02-18 02:05:13",
+  "total_tests": 15,
+  "passed": 14,
+  "failed": 1,
+  "errors": 0,
+  "success_rate_pct": 93.3,
+  "avg_latency_sec": 7.17,
+  "min_latency_sec": 3.01,
+  "max_latency_sec": 14.51,
+  "total_time_sec": 107.57,
+  "test_results": [
+    {
+      "test_id": 1,
+      "question": "How many opportunities are there?",
+      "description": "COUNT query on opportunities",
+      "status": "PASS",
+      "detail": "Count = 40",
+      "sql_query": "SELECT COUNT(*) AS total_opportunities FROM opportunities;",
+      "latency_sec": 14.51,
+      "has_answer": true
+    },
+    {
+      "test_id": 2,
+      "question": "List all territories",
+      "description": "SELECT from territories",
+      "status": "PASS",
+      "detail": "Returned 10 rows",
+      "sql_query": "SELECT * FROM territories;",
+      "latency_sec": 5.12,
+      "has_answer": true
+    },
+    {
+      "test_id": 3,
+      "question": "Show me all sales reps",
+      "description": "SELECT from sales_reps",
+      "status": "PASS",
+      "detail": "Returned 40 rows",
+      "sql_query": "SELECT * FROM sales_reps;",
+      "latency_sec": 8.01,
+      "has_answer": true
+    },
+    {
+      "test_id": 4,
+      "question": "How many customers do we have?",
+      "description": "COUNT on customers",
+      "status": "PASS",
+      "detail": "Count = 40",
+      "sql_query": "SELECT COUNT(*) AS total_customers FROM customers;",
+      "latency_sec": 3.79,
+      "has_answer": true
+    },
+    {
+      "test_id": 5,
+      "question": "Show all Closed Won opportunities",
+      "description": "Filtered SELECT with stage",
+      "status": "PASS",
+      "detail": "Returned 14 rows",
+      "sql_query": "SELECT * FROM opportunities WHERE stage = 'Closed Won';",
+      "latency_sec": 9.28,
+      "has_answer": true
+    },
+    {
+      "test_id": 6,
+      "question": "Which opportunities are in the Negotiation stage?",
+      "description": "Filtered by stage",
+      "status": "PASS",
+      "detail": "Returned 10 rows",
+      "sql_query": "SELECT * FROM opportunities WHERE stage = 'Negotiation';",
+      "latency_sec": 9.83,
+      "has_answer": true
+    },
+    {
+      "test_id": 7,
+      "question": "List accounts in the North region",
+      "description": "Filtered by region ENUM",
+      "status": "PASS",
+      "detail": "SQL executed without errors",
+      "sql_query": "SELECT * FROM accounts WHERE region = 'North';",
+      "latency_sec": 4.3,
+      "has_answer": true
+    },
+    {
+      "test_id": 8,
+      "question": "What is the total value of all Closed Won deals?",
+      "description": "SUM with filter",
+      "status": "PASS",
+      "detail": "SQL executed without errors",
+      "sql_query": "SELECT SUM(amount) AS total_closed_won_value FROM opportunities WHERE stage = 'Closed Won';",
+      "latency_sec": 3.38,
+      "has_answer": true
+    },
+    {
+      "test_id": 9,
+      "question": "What is the average deal size?",
+      "description": "AVG on amount",
+      "status": "PASS",
+      "detail": "SQL executed without errors",
+      "sql_query": "SELECT AVG(amount) AS average_deal_size FROM opportunities;",
+      "latency_sec": 3.01,
+      "has_answer": true
+    },
+    {
+      "test_id": 10,
+      "question": "Show opportunities with their account names",
+      "description": "JOIN opportunities + accounts",
+      "status": "PASS",
+      "detail": "Returned 40 rows",
+      "sql_query": "SELECT o.opportunity_id, o.stage, o.amount, a.account_name\nFROM opportunities o\nJOIN accounts a ON o.account_id = a.account_id;",
+      "latency_sec": 11.22,
+      "has_answer": true
+    },
+    {
+      "test_id": 11,
+      "question": "Which sales reps belong to which territories?",
+      "description": "JOIN sales_reps + territories",
+      "status": "PASS",
+      "detail": "Returned 30 rows",
+      "sql_query": "SELECT sr.sales_rep_id, sr.name AS sales_rep_name, t.territory_id, t.region, t.manager_name\nFROM sales_reps sr\nLEFT JOIN territories t ON sr.territory_id = t.territory_id\nWHERE sr.is_active = true;",
+      "latency_sec": 8.5,
+      "has_answer": true
+    },
+    {
+      "test_id": 12,
+      "question": "Which deals are high value deals?",
+      "description": "RAG: uses policy for amount >= 100000",
+      "status": "PASS",
+      "detail": "SQL executed without errors",
+      "sql_query": "SELECT opportunity_id, amount\nFROM opportunities\nWHERE amount >= 100000\n   OR (metadata->>'tcv')::numeric >= 250000\n   OR (metadata->>'seat_count')::int >= 500\n   OR (metadata->>'contract_years')::int >= 3;",
+      "latency_sec": 5.07,
+      "has_answer": true
+    },
+    {
+      "test_id": 13,
+      "question": "What is the weighted forecast?",
+      "description": "RAG: pipeline stage weights",
+      "status": "PASS",
+      "detail": "SQL executed without errors",
+      "sql_query": "SELECT SUM(amount * COALESCE(win_probability, CASE stage WHEN 'Proposal' THEN 50 WHEN 'Negotiation' THEN 70 WHEN 'Closed Won' THEN 100 ELSE 0 END) / 100.0) AS weighted_forecast FROM opportunities WHERE stage IN ('Proposal', 'Negotiation', 'Closed Won');",
+      "latency_sec": 7.43,
+      "has_answer": true
+    },
+    {
+      "test_id": 14,
+      "question": "Show the pipeline stages and their win probabilities",
+      "description": "RAG: stage definitions",
+      "status": "FAIL",
+      "detail": "SQL ERROR: invalid input value for enum opp_stage: \"Contract Sent\"\nLINE 7:            WHEN 'Contract Sent' THEN 85\n                        ^\n",
+      "sql_query": "SELECT stage, \n       CASE stage\n           WHEN 'Prospecting' THEN 10\n           WHEN 'Qualification' THEN 30\n           WHEN 'Proposal' THEN 50\n           WHEN 'Negotiation' THEN 70\n           WHEN 'Contract Sent' THEN 85\n           WHEN 'Closed Won' THEN 100\n           WHEN 'Closed Lost' THEN 0\n           ELSE NULL\n       END AS win_probability\nFROM opportunities\nGROUP BY stage;",
+      "latency_sec": 10.58,
+      "has_answer": true
+    },
+    {
+      "test_id": 15,
+      "question": "Hello!",
+      "description": "Should return greeting",
+      "status": "PASS",
+      "detail": "Greeting response detected",
+      "sql_query": "SELECT 'Hello! I am your Sales Ops Intelligence Agent.' AS greeting;",
+      "latency_sec": 3.53,
+      "has_answer": true
+    }
+  ]
+}

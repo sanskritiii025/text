@@ -2,10 +2,12 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 import json
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import urllib.parse  
 
 DB_USER = "postgres"
-RAW_PASS = "Sanskriti@25" 
+RAW_PASS = os.getenv("DB_PASSWORD") 
 DB_PASS = urllib.parse.quote_plus(RAW_PASS) 
 
 DB_HOST = "localhost"
